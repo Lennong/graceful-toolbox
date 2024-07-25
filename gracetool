@@ -1,0 +1,419 @@
+#!/bin/bash
+gracefulLog=/tmp/graceful.log
+
+###########################
+#ProxMox Backup Server (PBS) settings
+# Backup server (PBS) IP
+ipPBS="0.0.0.0"
+
+# Backup server (PBS) repository
+repPBS="backup"
+
+# Backup server (PBS) user
+userPBS="User"
+
+# Backup server (PBS) password
+passPBS="Password"
+
+# Additional folders to include in backup process.
+#Separate each full path by space, example:
+#includeDIR="/config /etc/pve"
+includeDIR="/config /etc/pve"
+
+# Single folders to include in folder only backup.
+#Separate each full path by space, example:
+#singleDIR="/config/none /etc/none"
+singleDIR="/other /none /bent/dent"
+
+###########################
+#ProxMox Virtual Environment (PVE) settings
+hostPVE=$(hostname)
+idVM="1,2,3,4" # ID's of PVM's, comma separated
+
+###########################
+#Docker settings
+hostDOCKER="0.0.0.0"
+export DOCKER_HOST=ssh://root@$hostDOCKER
+export LANG=en_US.UTF-8
+
+###########################
+#RocketChat settings
+RocketbotUser=User
+RocketbotPassword=Password
+RocketchatDomain=https://chat.chat.com
+RocketadminCHANNEL=
+RocketBackReport=/tmp/RocketBackReport.out
+
+###########################
+#Clean work logs
+rm $RocketBackReport 2> /dev/null
+rm $gracefulLog 2> /dev/null
+
+###########################
+#Arguments pickup
+if [[ $1 =~ ^[[:print:]] ]] && ! [[ $1 =~ ^[[:lower:]] ]]; then
+	arg1=$1
+else
+	echo "Input not valid!! Valid inputs are 'graceful [HOST,SERVICES,DOCKER,BACKUP] [reboot,stop,"$hostPVE",folders]'" ; exit 1
+fi
+arg2=$2
+
+###########################
+
+HOST() {
+	if [[ $arg2 == "stop" ]]; then
+		echo "Shutting down host.."
+		echo "Shutting down host is blocked!!"
+		#state="systemctl poweroff"
+		state=""
+	elif [[ $arg2 == "reboot" ]]; then
+		echo "Rebooting host.."
+		state="systemctl reboot"
+	else
+		echo "Input not valid!! Valid inputs are 'graceful HOST [stop,reboot]'" ; exit 1
+	fi
+	check-if-root
+	check-ssh-docker-host
+	docker-stop
+	proxmox-stop
+	$state | /bin/sh
+}
+
+SERVICES() {
+	if [[ ! "$hostDOCKER" =~ [0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3} ]]; then
+		echo "Docker settings incomplete!" ; exit 1
+	fi
+	if [[ $arg2 == "stop" ]]; then
+		check-if-root
+		check-ssh-docker-host
+		> /tmp/runningDOCKER.run
+		docker-stop
+		> /tmp/runningVM.run
+		proxmox-stop
+	elif [[ $arg2 == "start" ]]; then
+		check-if-root
+		proxmox-start
+		check-ssh-docker-host
+		docker-start
+	else
+		echo "Input not valid!! Valid inputs are 'graceful SERVICES [stop,start]'" ; exit 1
+	fi
+}
+
+DOCKER() {
+	if [[ ! "$hostDOCKER" =~ [0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3} ]]; then
+		echo "Docker settings incomplete!" ; exit 1
+	fi
+	if [[ $arg2 == "stop" ]]; then
+		check-if-root
+		check-ssh-docker-host
+		> /tmp/runningDOCKER.run
+		docker-stop
+	elif [[ $arg2 == "start" ]]; then
+		check-if-root
+		check-ssh-docker-host
+		docker-start
+	else
+		echo "Input not valid!! Valid inputs are 'graceful DOCKER [stop,start]'" ; exit 1
+	fi
+}
+
+BACKUP() {
+	if [[ ! $ipPBS =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
+		[[ -z "$repPBS" ]] || \
+		[[ -z "$userPBS" ]] || \
+		[[ -z "$passPBS" ]] || \
+		[[ -z "$repPBS" ]]; then
+		echo "PBS settings incomplete!" ; exit 1
+	fi
+	if [[ $arg2 == "vm" ]]; then
+		echo "Backing up VM's.."
+		check-if-root
+		check-ssh-docker-host
+		docker-stop
+		proxmox-stop
+		> $RocketBackReport
+		backup-vm
+		proxmox-start
+		check-ssh-docker-host
+		docker-start
+		message-rocket-backreport
+	elif [[ $arg2 == "all" ]]; then
+		echo "Backing up VM's & "$hostPVE".."
+		check-if-root
+		check-ssh-docker-host
+		docker-stop
+		proxmox-stop
+		> $RocketBackReport
+		backup-auth
+		backup-host
+		backup-vm
+		backup-folders
+		proxmox-start
+		check-ssh-docker-host
+		docker-start
+		backup-auth-clean
+		message-rocket-backreport
+	elif [[ $arg2 == $hostPVE ]]; then
+		echo "Backing up $hostPVE.."
+		check-if-root
+		check-ssh-docker-host
+		docker-stop
+		proxmox-stop
+		> $RocketBackReport
+		backup-auth
+		backup-host
+		proxmox-start
+		check-ssh-docker-host
+		docker-start
+		backup-auth-clean
+		message-rocket-backreport
+	elif [[ $arg2 == folders ]]; then
+		echo "Backing up folders.."
+		check-if-root
+		> $RocketBackReport
+		backup-auth
+		backup-folders
+		backup-auth-clean
+		message-rocket-backreport
+	else
+		echo "Input not valid!! Valid inputs are 'graceful BACKUP [vm,all,"$hostPVE",folders]'" ; exit 1
+	fi
+}
+
+###########################
+
+check-if-root() {
+	if [[ ${EUID} -ne 0 ]] ; then
+		echo "Aborting because you are not root!" ; exit 1
+	fi
+}
+
+check-ssh-docker-host() {
+	ssh -q $DOCKER_HOST exit
+	if [[ $? != "0" ]]; then
+		echo "Aborting because you dont have SSH access to the Docker host!" ; exit 1
+	fi
+}
+
+proxmox-stop() {
+	pveSTATUS=$(pvesh get /cluster/resources --type vm --noborder --noheader | awk '{printf "%s\n",""$13" ""is"" "$15}' | column -t)
+	pveRUNNING=$(echo "$pveSTATUS" | grep 'running')
+	pveLINES=$(echo "$pveSTATUS" | wc -l)
+
+	if [[ -n "$pveRUNNING" ]]; then
+		echo""
+		echo "Shutting down ProxMox VM's.."
+
+		# scan for running VM's and store result in an array
+		mapfile -t runningVM < <(pvesh get /cluster/resources --type vm --noborder --noheader | \
+		awk '{printf "%s\n",$1" "$15}' | \
+		sed -e 's/lxc\//\/usr\/sbin\/pct /g' -e 's/qemu\//\/usr\/sbin\/qm /g' | \
+		awk '{t=$2;$2=$3;$3=t;print;}' | \
+		grep 'running')
+		if [[ -f /tmp/runningVM.run ]]; then
+			printf "%s\n" "${runningVM[@]}" >> /tmp/runningVM.run
+		fi
+
+		# parse the stored array and send shutdown command to the running VM's
+		for i in "${runningVM[@]}"; do echo $i | sed -e 's/running/shutdown/g' | /bin/sh > /dev/null & done &
+
+		# print out colorized status on shutdown process
+		for (( i=1; i <= $(($pveLINES)); i++ )); do echo ""; done
+		while grep 'running' <<< "$pveSTATUS" > /dev/null; do
+		pveSTATUS=$(pvesh get /cluster/resources --type vm --noborder --noheader | awk '{printf "%s\n",""$13" ""is"" "$15}' | column -t)
+		sleep 1
+		for (( i=1; i <= $(($pveLINES)); i++ )); do tput cuu1; tput el; done
+		echo "$pveSTATUS" | grep --color=always -e "^" -e "stopped" | GREP_COLORS='mt=01;32' grep --color=auto -e "^" -e "running"
+		done
+		for (( i=1; i <= $(($pveLINES)); i++ )); do tput cuu1; tput el; done
+		echo "All ProxMox VM's are stopped!"
+		echo "$pveSTATUS" | grep --color=always -e "^" -e "stopped" | GREP_COLORS='mt=01;32' grep --color=auto -e "^" -e "running"
+		echo""
+	else
+		echo "All ProxMox VM's are stopped!"
+		echo "$pveSTATUS" | grep --color=always -e "^" -e "stopped" | GREP_COLORS='mt=01;32' grep --color=auto -e "^" -e "running"
+		echo""
+	fi
+}
+
+proxmox-start() {
+	pveSTATUS=$(pvesh get /cluster/resources --type vm --noborder --noheader | awk '{printf "%s\n",""$13" ""is"" "$15}' | column -t)
+	pveToSTART=$(echo $pveRUNNING | wc -l)
+	pveSTARTED=$(pvesh get /cluster/resources --type vm --noborder --noheader | grep 'running' | wc -l)
+	pveLINES=$(echo "$pveSTATUS" | wc -l)
+
+	if [[ $pveSTARTED < $pveToSTART ]]; then
+		echo""
+		echo "Starting up Proxmox VM's.."
+
+		# parse the stored array and send start up command to the previous running VM's
+		if [[ -f /tmp/runningVM.run ]]; then
+			while read i; do echo "$i" | \
+			sed -e 's/running/start/g' | /bin/sh; done </tmp/runningVM.run >/dev/null &
+		else
+			for i in "${runningVM[@]}"; do echo $i | sed -e 's/running/start/g' | /bin/sh > /dev/null & done &
+		fi
+
+		# print out colorized status on start up process
+		for (( i=1; i <= $(($pveLINES)); i++ )); do echo ""; done
+		while [[ $pveSTARTED < $pveToSTART ]] > /dev/null; do
+		pveSTARTED=$(pvesh get /cluster/resources --type vm --noborder --noheader | grep 'running' | wc -l)
+		sleep 1
+		for (( i=1; i <= $(($pveLINES)); i++ )); do tput cuu1; tput el; done
+		pveSTATUS=$(pvesh get /cluster/resources --type vm --noborder --noheader | awk '{printf "%s\n",""$13" ""is"" "$15}' | column -t)
+		echo "$pveSTATUS" | grep --color=always -e "^" -e "stopped" | GREP_COLORS='mt=01;32' grep --color=auto -e "^" -e "running"
+		done
+		for (( i=1; i <= $(($pveLINES)); i++ )); do tput cuu1; tput el; done
+		echo "All ProxMox VM's are started!"
+		echo "$pveSTATUS" | grep --color=always -e "^" -e "stopped" | GREP_COLORS='mt=01;32' grep --color=auto -e "^" -e "running"
+		rm /tmp/runningVM.run 2> /dev/null
+		echo""
+	else
+		echo "All ProxMox VM's are started!"
+		echo "$pveSTATUS" | grep --color=always -e "^" -e "stopped" | GREP_COLORS='mt=01;32' grep --color=auto -e "^" -e "running"
+		rm /tmp/runningVM.run 2> /dev/null
+		echo""
+	fi
+}
+
+docker-stop() {
+	dockerSTATUS=$(/usr/bin/docker ps -a --format '{{.Names}}\t is {{.State}}' | sed -e 's/exited/stopped/g' | column -t)
+	dockerRUNNING=$(echo "$dockerSTATUS" | grep 'running')
+	dockerLINES=$(echo "$dockerSTATUS" | wc -l)
+
+	if [[ -n "$dockerRUNNING" ]]; then
+		echo""
+		echo "Shutting down Docker containers.."
+
+		# scan for running Dockers and store result in array
+		mapfile -t runningDOCKER < <(/usr/bin/docker ps -a --format '/usr/bin/docker {{.State}}\t{{.Names}}' | grep 'running')
+		if [[ -f /tmp/runningDOCKER.run ]]; then
+			printf "%s\n" "${runningDOCKER[@]}" >> /tmp/runningDOCKER.run
+		fi
+
+		# parse the stored array and send shutdown command to the running Dockers
+		for i in "${runningDOCKER[@]}"; do echo $i | sed -e 's/running/stop/g' | /bin/sh > /dev/null & done &
+
+		# print out colorized status on shutdown process
+		for (( i=1; i <= $(($dockerLINES)); i++ )); do echo ""; done
+		while grep 'running' <<< "$dockerSTATUS" > /dev/null; do
+		dockerSTATUS=$(/usr/bin/docker ps -a --format '{{.Names}}\t is {{.State}}' | sed -e 's/exited/stopped/g' | column -t)
+		sleep 1
+		for (( i=1; i <= $(($dockerLINES)); i++ )); do tput cuu1; tput el; done
+		echo "$dockerSTATUS" | grep --color=always -e "^" -e "stopped" | GREP_COLORS='mt=01;32' grep --color=auto -e "^" -e "running"
+		done
+		for (( i=1; i <= $(($dockerLINES)); i++ )); do tput cuu1; tput el; done
+		echo "All Docker containers are stopped!"
+		echo "$dockerSTATUS" | grep --color=always -e "^" -e "stopped" | GREP_COLORS='mt=01;32' grep --color=auto -e "^" -e "running"
+	else
+		echo "All Docker containers are stopped!"
+		echo "$dockerSTATUS" | grep --color=always -e "^" -e "stopped" | GREP_COLORS='mt=01;32' grep --color=auto -e "^" -e "running"
+	fi
+}
+
+docker-start() {
+	dockerSTATUS=$(/usr/bin/docker ps -a --format '{{.Names}}\t is {{.State}}' | sed -e 's/exited/stopped/g' | column -t)
+	dockerToSTART=$(echo $dockerRUNNING | wc -l)
+	dockerSTARTED=$(/usr/bin/docker ps -a --format '{{.State}}' | grep 'running' | wc -l)
+	dockerLINES=$(echo "$dockerSTATUS" | wc -l)
+
+	if [[ $dockerSTARTED < $dockerToSTART ]]; then
+		echo""
+		echo "Starting up Docker containers.."
+
+		# parse the stored array and send start up command to the previous running Dockers
+		if [[ -f /tmp/runningDOCKER.run ]]; then
+			while read i; do echo "$i" | \
+			sed -e 's/running/start/g' | /bin/sh; done </tmp/runningDOCKER.run >/dev/null &
+		else
+			for i in "${runningDOCKER[@]}"; do echo $i | sed -e 's/running/start/g' | /bin/sh > /dev/null & done &
+		fi
+
+		# print out colorized status on starting process
+		for (( i=1; i <= $(($dockerLINES)); i++ )); do echo ""; done
+		while [[ $dockerSTARTED < $dockerToSTART ]] > /dev/null; do
+		dockerSTARTED=$(/usr/bin/docker ps -a --format '{{.State}}' | grep 'running' | wc -l)
+		sleep 1
+		for (( i=1; i <= $(($dockerLINES)); i++ )); do tput cuu1; tput el; done
+		dockerSTATUS=$(/usr/bin/docker ps -a --format '{{.Names}}\t is {{.State}}' | sed -e 's/exited/stopped/g' | column -t)
+		echo "$dockerSTATUS" | grep --color=always -e "^" -e "stopped" | GREP_COLORS='mt=01;32' grep --color=auto -e "^" -e "running"
+		done
+		for (( i=1; i <= $(($dockerLINES)); i++ )); do tput cuu1; tput el; done
+		echo "All Docker containers are started!"
+		echo "$dockerSTATUS" | grep --color=always -e "^" -e "stopped" | GREP_COLORS='mt=01;32' grep --color=auto -e "^" -e "running"
+		rm /tmp/runningDOCKER.run 2> /dev/null
+	else
+		echo "All Docker containers are started!"
+		echo "$dockerSTATUS" | grep --color=always -e "^" -e "stopped" | GREP_COLORS='mt=01;32' grep --color=auto -e "^" -e "running"
+		rm /tmp/runningDOCKER.run 2> /dev/null
+	fi
+}
+
+backup-vm() {
+	if [[ ! -s $RocketBackReport ]]; then
+		echo ":floppy_disk: Backup report $(date +%F) :floppy_disk:" >> $RocketBackReport
+	fi
+	echo "" >> $RocketBackReport
+	echo "Backup VM's: Started $(date +%T)" >> $RocketBackReport
+	vzdump "$idVM" --mode stop --remove no --storage "$repPBS" >> $gracefulLog
+	echo "$(cat $gracefulLog | grep 'CT Name\|VM Name' | sed -e 's/CT/VM/g' -e 's/INFO: VM Name:/Backup <--/g')" >> $RocketBackReport
+	echo "Backup VM's: Stopped $(date +%T)" >> $RocketBackReport
+}
+
+backup-host() {
+	if [[ ! -s $RocketBackReport ]]; then
+		echo ":floppy_disk: Backup report $(date +%F) :floppy_disk:" >> $RocketBackReport
+	fi
+	echo "" >> $RocketBackReport
+	echo "Backup HOST: Started $(date +%T)" >> $RocketBackReport
+	proxmox-backup-client backup "$userPBS".pxar:/ $(sed -e 's/[[:space:]]/ --include-dev /' -e '0,/\// s/\//--include-dev \//' <<< $includeDIR)
+	echo "Backup <-- HangBox" >> $RocketBackReport
+	echo "Backup HOST: Stopped $(date +%T)" >> $RocketBackReport
+}
+
+backup-folders() {
+	if [[ ! -s $RocketBackReport ]]; then
+		echo ":floppy_disk: Backup report $(date +%F) :floppy_disk:" >> $RocketBackReport
+	fi
+	echo "" >> $RocketBackReport
+	echo "Backup FOLDERS: Started $(date +%T)" >> $RocketBackReport
+	read -a singleARR <<< "$singleDIR"
+	for i in "${singleARR[@]}"; do
+	proxmox-backup-client backup --backup-type host root.pxar:"$i" --backup-id $(echo $i | awk -F/ '{ print $NF }')
+	echo "Backup <-- "$i"" >> $RocketBackReport
+	done
+	echo "Backup FOLDERS: Stopped $(date +%T)" >> $RocketBackReport
+}
+
+backup-auth() {
+	export PBS_REPOSITORY="$ipPBS":"$repPBS"
+	export PBS_PASSWORD="$passPBS"
+}
+
+backup-auth-clean() {
+	export PBS_REPOSITORY=""
+	export PBS_PASSWORD=""
+}
+
+message-rocket-backreport() {
+if [ -s $RocketBackReport ]; then
+python3 - <<- EOF
+import requests
+while True:
+    url = '$RocketchatDomain'
+    response = requests.get(url)
+    if response.status_code == 200:
+        break
+
+from rocketchat.api import RocketChatAPI
+api = RocketChatAPI(settings={'username': '$RocketbotUser', 'password': '$RocketbotPassword', 'domain': '$RocketchatDomain'})
+RocketBackReport = '/tmp/RocketBackReport.out'
+api.send_message((open(RocketBackReport, 'r').read()), '$RocketadminCHANNEL')
+EOF
+fi
+}
+
+###########################
+$arg1
+###########################
