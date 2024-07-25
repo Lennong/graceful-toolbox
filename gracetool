@@ -63,9 +63,7 @@ arg2=$2
 HOST() {
 	if [[ $arg2 == "stop" ]]; then
 		echo "Shutting down host.."
-		echo "Shutting down host is blocked!!"
-		#state="systemctl poweroff"
-		state=""
+		state="systemctl poweroff"
 	elif [[ $arg2 == "reboot" ]]; then
 		echo "Rebooting host.."
 		state="systemctl reboot"
