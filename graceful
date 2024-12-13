@@ -195,7 +195,7 @@ check-ssh-docker-host() {
 }
 
 proxmox-stop() {
-	pveSTATUS=$(pvesh get /cluster/resources --type vm --noborder --noheader | awk '{printf "%s\n",""$13" ""is"" "$15}' | column -t)
+	pveSTATUS=$(pvesh get /cluster/resources --type vm --noborder --noheader | awk '{printf "%s\n",""$17" ""is"" "$23}' | column -t)
 	pveRUNNING=$(echo "$pveSTATUS" | grep 'running')
 	pveLINES=$(echo "$pveSTATUS" | wc -l)
 
@@ -219,7 +219,7 @@ proxmox-stop() {
 		# print out colorized status on shutdown process
 		for (( i=1; i <= $(($pveLINES)); i++ )); do echo ""; done
 		while grep 'running' <<< "$pveSTATUS" > /dev/null; do
-		pveSTATUS=$(pvesh get /cluster/resources --type vm --noborder --noheader | awk '{printf "%s\n",""$13" ""is"" "$15}' | column -t)
+		pveSTATUS=$(pvesh get /cluster/resources --type vm --noborder --noheader | awk '{printf "%s\n",""$17" ""is"" "$23}' | column -t)
 		sleep 1
 		for (( i=1; i <= $(($pveLINES)); i++ )); do tput cuu1; tput el; done
 		echo "$pveSTATUS" | grep --color=always -e "^" -e "stopped" | GREP_COLORS='mt=01;32' grep --color=auto -e "^" -e "running"
@@ -236,7 +236,7 @@ proxmox-stop() {
 }
 
 proxmox-start() {
-	pveSTATUS=$(pvesh get /cluster/resources --type vm --noborder --noheader | awk '{printf "%s\n",""$13" ""is"" "$15}' | column -t)
+	pveSTATUS=$(pvesh get /cluster/resources --type vm --noborder --noheader | awk '{printf "%s\n",""$17" ""is"" "$23}' | column -t)
 	pveToSTART=$(echo $pveRUNNING | wc -l)
 	pveSTARTED=$(pvesh get /cluster/resources --type vm --noborder --noheader | grep 'running' | wc -l)
 	pveLINES=$(echo "$pveSTATUS" | wc -l)
@@ -259,7 +259,7 @@ proxmox-start() {
 		pveSTARTED=$(pvesh get /cluster/resources --type vm --noborder --noheader | grep 'running' | wc -l)
 		sleep 1
 		for (( i=1; i <= $(($pveLINES)); i++ )); do tput cuu1; tput el; done
-		pveSTATUS=$(pvesh get /cluster/resources --type vm --noborder --noheader | awk '{printf "%s\n",""$13" ""is"" "$15}' | column -t)
+		pveSTATUS=$(pvesh get /cluster/resources --type vm --noborder --noheader | awk '{printf "%s\n",""$17" ""is"" "$23}' | column -t)
 		echo "$pveSTATUS" | grep --color=always -e "^" -e "stopped" | GREP_COLORS='mt=01;32' grep --color=auto -e "^" -e "running"
 		done
 		for (( i=1; i <= $(($pveLINES)); i++ )); do tput cuu1; tput el; done
